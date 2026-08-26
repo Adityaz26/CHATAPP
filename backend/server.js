@@ -80,14 +80,26 @@ function broadcastUserList(roomId) {
   broadcastToRoom(roomId, { type: "user_list", roomId, users, count: users.length });
 }
 
-function removeFromCall(ws) {
-  const { roomId, id } = ws;
+function removeFromCall(ws, { silent = false } = {}) {
+  const { roomId, id, username } = ws;
   if (!roomId) return;
   const callRoom = callRooms.get(roomId);
   if (!callRoom || !callRoom.has(ws)) return;
 
   callRoom.delete(ws);
   broadcastToCall(roomId, { type: "peer-left", id }, ws);
+
+  if (!silent && username) {
+    broadcastToRoom(
+      roomId,
+      {
+        type: "system",
+        text: `${username} left the video call`,
+        time: new Date().toLocaleTimeString(),
+      },
+      ws
+    );
+  }
 
   if (callRoom.size === 0) {
     callRooms.delete(roomId);
@@ -100,7 +112,7 @@ function removeFromRoom(ws) {
   const room = rooms.get(roomId);
   if (!room) return;
 
-  removeFromCall(ws);
+  removeFromCall(ws, { silent: true });
   room.delete(ws);
 
   if (username) {
@@ -127,6 +139,11 @@ wss.on("connection", (ws) => {
   ws.id = crypto.randomUUID();
   ws.username = null;
   ws.roomId = null;
+  ws.isAlive = true;
+
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
 
   ws.on("message", (data) => {
     let msg;
@@ -255,6 +272,15 @@ wss.on("connection", (ws) => {
 
         safeSend(ws, { type: "call-peers", peers: existingPeers });
         broadcastToCall(ws.roomId, { type: "peer-joined", id: ws.id, username: ws.username }, ws);
+        broadcastToRoom(
+          ws.roomId,
+          {
+            type: "system",
+            text: `${ws.username} joined the video call`,
+            time: new Date().toLocaleTimeString(),
+          },
+          ws
+        );
         break;
       }
 
@@ -300,3 +326,18 @@ const PORT = process.env.PORT || 4000;
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
+const HEARTBEAT_INTERVAL_MS = 25000;
+
+const heartbeat = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      removeFromRoom(ws);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL_MS);
+
+wss.on("close", () => clearInterval(heartbeat));
